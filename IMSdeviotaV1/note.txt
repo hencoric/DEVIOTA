@@ -1,0 +1,837 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Barang;
+use App\Models\Kategori;
+use App\Models\Mahasiswa;
+use App\Models\Peminjaman;
+use Illuminate\Http\Request;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Support\Facades\DB;
+
+
+class PeminjamanController extends Controller
+{
+    public function index()
+    {
+        $peminjaman = Peminjaman::with('mahasiswa', 'barang')->get();
+        return view('peminjaman.index', compact('peminjaman'));
+    }
+
+    public function create()
+    {
+        $barang = Barang::all();
+        return view('peminjaman.create', compact('barang'));
+    }
+
+    public function listBarang(Request $request)
+    {
+        $kategori = Kategori::all();
+
+        $query = Barang::with('kategori')
+                    ->where('tipe', 'Barang Dipinjam')
+                    ->where('stok', '>', 0);
+
+        // Filter pencarian
+        if ($request->filled('search')) {
+            $query->where('nama_barang', 'like', '%' . $request->search . '%');
+        }
+
+        // Filter berdasarkan ID kategori
+        if ($request->filled('kategori')) {
+            $query->where('id_kategori', $request->kategori);
+        }
+
+        $barang = $query->get();
+
+        return view('peminjaman.listbarang', compact('barang', 'kategori'));
+    }
+
+    public function showKeranjang(Request $request)
+    {
+        $cart = json_decode($request->input('cart'), true);
+        session(['cart' => $cart]);
+
+        $barangIds = collect($cart)->pluck('id_barang');
+        $barang = Barang::with('foto')->whereIn('id_barang', $barangIds)->get();
+    
+        // Gabungkan dengan jumlah
+        $barangWithQty = $barang->map(function ($barang) use ($cart) {
+            $qty = collect($cart)->firstWhere('id_barang', $barang->id_barang)['jumlah'];
+            return [
+                'barang' => $barang,
+                'jumlah' => $qty
+            ];
+        });
+    
+        return view('peminjaman.create', compact('barangWithQty'));
+    }
+    
+    public function submitPeminjaman(Request $request)
+    {
+        $validated = $request->validate([
+            'kontak' => 'required',
+            'tanggal_kembali' => 'required|date',
+        ]);
+
+        $cart = session('cart', []);
+
+        // Ambil data mahasiswa dari session login
+        $loginData = session('login_mahasiswa');
+        $nim = $loginData['nim'] ?? null;
+        $nama = $loginData['nama'] ?? null;
+
+        if (!$nim || !$nama) {
+            return redirect()->route('login.form')->with('error', 'Sesi login tidak ditemukan. Silakan login kembali.');
+        }
+
+        $mahasiswa = Mahasiswa::where('nim', $nim)->first();
+
+        if ($mahasiswa) {
+            // Validasi nama juga agar tidak sembarangan login palsu
+            if (strtolower(trim($mahasiswa->nama_mahasiswa)) !== strtolower(trim($nama))) {
+                return redirect()->back()
+                    ->with('error', 'Data login tidak valid.')
+                    ->withInput();
+            }
+
+            // Update kontak jika berubah
+            $mahasiswa->kontak = $validated['kontak'];
+            $mahasiswa->save();
+        } else {
+            // Mahasiswa tidak ditemukan padahal login sukses => buat baru
+            $mahasiswa = Mahasiswa::create([
+                'nim' => $nim,
+                'nama_mahasiswa' => $nama,
+                'kontak' => $validated['kontak'],
+            ]);
+        }
+
+        foreach ($cart as $item) {
+            $barang = Barang::find($item['id_barang']);
+            if (!$barang || $barang->stok < $item['jumlah']) {
+                return back()->withErrors(['stok' => 'Stok tidak mencukupi untuk salah satu barang.'])->withInput();
+            }
+
+            Peminjaman::create([
+                'id_mahasiswa' => $mahasiswa->id_mahasiswa,
+                'id_barang' => $item['id_barang'],
+                'jumlah' => $item['jumlah'],
+                'tanggal_pinjam' => now(),
+                'tanggal_kembali' => $validated['tanggal_kembali'],
+                'status' => 'Dipinjam',
+            ]);
+
+            $barang->stok -= $item['jumlah'];
+            $barang->save();
+        }
+
+        session()->forget('cart');
+
+        return redirect()->route('keranjang')->with('success', 'Peminjaman berhasil!');
+    }
+
+
+
+    /*public function store(Request $request)
+    {
+        $request->validate([
+            'nama_mahasiswa' => 'required|string',
+            'nim' => 'required|string',
+            'kontak' => 'required|string',
+            'id_barang' => 'required|exists:barang,id_barang',
+            'jumlah' => 'required|integer',
+            'tanggal_pinjam' => 'required|date',
+            'tanggal_kembali' => 'nullable|date',
+        ]);
+
+        $mahasiswa = Mahasiswa::updateOrCreate(
+            ['nim' => $request->nim],
+            [
+                'nama_mahasiswa' => $request->nama_mahasiswa,
+                'kontak' => $request->kontak,
+            ]
+        );
+
+        $barang = Barang::find($request->id_barang);
+
+        if ($barang->stok < $request->jumlah) {
+            return back()->withErrors(['jumlah' => 'Stok tidak mencukupi untuk peminjaman.'])->withInput();
+        }
+
+        Peminjaman::create([
+            'id_mahasiswa' => $mahasiswa->id_mahasiswa,
+            'id_barang' => $request->id_barang,
+            'jumlah' => $request->jumlah,
+            'tanggal_pinjam' => $request->tanggal_pinjam,
+            'tanggal_kembali' => $request->tanggal_kembali,
+            'status' => 'Dipinjam',
+        ]);
+
+        $barang->stok -= $request->jumlah;
+        $barang->save();
+
+        return redirect()->route('welcome')->with('success', 'Peminjaman berhasil ditambahkan.');
+    }*/
+
+    public function formKembalikan(Request $request)
+    {
+        $nim = $request->nim;
+        $nama = $request->nama_mahasiswa;
+
+        $mahasiswa = Mahasiswa::where('nim', $nim)
+            ->where('nama_mahasiswa', $nama)
+            ->firstOrFail();
+
+        $peminjaman = Peminjaman::with('barang')
+            ->where('id_mahasiswa', $mahasiswa->id_mahasiswa)
+            ->where('status', '!=', 'Dikembalikan')
+            ->get();
+
+        // Simpan jumlah awal sekali (untuk rekapan)
+        foreach ($peminjaman as $pinjam) {
+            $key = "jumlah_awal_{$pinjam->id_peminjaman}";
+            if (!session()->has($key)) {
+                session()->put($key, $pinjam->jumlah);
+            }
+        }
+
+        return view('peminjaman.kembalikan', compact('peminjaman', 'mahasiswa'));
+    }
+
+ public function kembalikanSemuaBarang(Request $request)
+    {
+        $request->validate([
+            'id_mahasiswa' => 'required|exists:mahasiswa,id_mahasiswa'
+        ]);
+
+        $idMahasiswa = $request->id_mahasiswa;
+        $mahasiswa = Mahasiswa::findOrFail($idMahasiswa);
+
+        $peminjaman = Peminjaman::where('id_mahasiswa', $idMahasiswa)
+            ->where('status', '!=', 'Dikembalikan')
+            ->get();
+
+        foreach ($peminjaman as $item) {
+            $sessionKey = "jumlah_awal_{$item->id_peminjaman}";
+            $jumlahAwal = session($sessionKey, $item->jumlah); // fallback
+            $jumlahSekarang = $item->jumlah;
+
+            $sisa = $jumlahAwal - $jumlahSekarang;
+
+            if ($sisa > 0) {
+                $barang = Barang::findOrFail($item->id_barang);
+                $barang->stok += $sisa;
+                $barang->save();
+            }
+
+            // Reset jumlah & update status
+            $item->jumlah = $jumlahAwal;
+            $item->status = 'Dikembalikan';
+            $item->tanggal_kembali = now();
+            $item->save();
+
+            session()->forget($sessionKey);
+        }
+
+        return redirect()->route('peminjaman.kembalikanForm', [
+            'nama_mahasiswa' => $mahasiswa->nama_mahasiswa,
+            'nim' => $mahasiswa->nim,
+        ])->with('success', 'Berhasil Mengembalikan Semua Item');
+    }
+
+    public function prosesKembalikan(Request $request, $id)
+    {
+        $peminjaman = Peminjaman::with('mahasiswa')->findOrFail($id);
+
+        $request->validate([
+            'jumlah_kembalikan' => 'required|numeric|min:1|max:' . $peminjaman->jumlah
+        ]);
+
+        $jumlahKembalikan = $request->jumlah_kembalikan;
+
+        // Simpan jumlah awal jika belum ada
+        $sessionKey = "jumlah_awal_{$peminjaman->id_peminjaman}";
+        if (!session()->has($sessionKey)) {
+            session()->put($sessionKey, $peminjaman->jumlah);
+        }
+
+        // Tambahkan ke stok barang
+        $barang = Barang::findOrFail($peminjaman->id_barang);
+        $barang->stok += $jumlahKembalikan;
+        $barang->save();
+
+        // Kurangi jumlah
+        $peminjaman->jumlah -= $jumlahKembalikan;
+
+        if ($peminjaman->jumlah <= 0) {
+            // Ambil jumlah awal
+            $jumlahAwal = session($sessionKey, $jumlahKembalikan); // fallback
+
+            // Reset jumlah ke awal hanya untuk keperluan rekapan
+            $peminjaman->jumlah = $jumlahAwal;
+            $peminjaman->status = 'Dikembalikan';
+            $peminjaman->tanggal_kembali = now();
+
+            // Hapus session
+            session()->forget($sessionKey);
+        } else {
+            $peminjaman->status = 'Dikembalikan Sebagian';
+        }
+
+        $peminjaman->save();
+
+        // Refresh data
+        $mahasiswa = $peminjaman->mahasiswa;
+        $peminjamanAll = Peminjaman::with('barang')
+            ->where('id_mahasiswa', $mahasiswa->id_mahasiswa)
+            ->where('status', '!=', 'Dikembalikan')
+            ->get();
+
+        return view('peminjaman.kembalikan', [
+            'peminjaman' => $peminjamanAll,
+            'mahasiswa' => $mahasiswa,
+        ])->with('success', 'Berhasil Mengembalikan Item');
+    }
+
+
+    public function show_riwayat_peminjaman(Request $request) 
+    {
+        $query = Peminjaman::with(['mahasiswa', 'barang']);
+        
+        // Filter status (opsional)
+        if ($request->filled('filter_status')) {
+            $query->where('status', $request->filter_status);
+        }
+        
+        // Filter rentang datetime
+        if ($request->filled('tanggal_mulai') && $request->filled('tanggal_selesai')) {
+            $query->whereBetween('tanggal_pinjam', [
+                $request->tanggal_mulai . ' 00:00:00',
+                $request->tanggal_selesai . ' 23:59:59'
+            ]);
+        }
+        
+        $peminjaman = $query->orderBy('tanggal_pinjam', 'desc')->get();
+        
+        return view('admin/peminjaman.index', [
+            'peminjaman' => $peminjaman,
+            'status_terpilih' => $request->filter_status ?? '',
+            'tanggal_mulai' => $request->tanggal_mulai,
+            'tanggal_selesai' => $request->tanggal_selesai
+        ]);
+    }
+
+    public function exportPDF(Request $request)
+    {
+        $query = Peminjaman::with(['mahasiswa', 'barang']);
+
+        if ($request->filled('filter_status')) {
+            $query->where('status', $request->filter_status);
+        }
+
+        if ($request->filled('tanggal_mulai') && $request->filled('tanggal_selesai')) {
+            $query->whereBetween('tanggal_pinjam', [
+                $request->tanggal_mulai . ' 00:00:00',
+                $request->tanggal_selesai . ' 23:59:59'
+            ]);
+        }
+
+        $peminjaman = $query->orderBy('tanggal_pinjam', 'desc')->get();
+
+        $pdf = Pdf::loadView('admin.peminjaman.pdf', [
+            'peminjaman' => $peminjaman,
+            'status_terpilih' => $request->filter_status ?? '',
+            'tanggal_mulai' => $request->tanggal_mulai,
+            'tanggal_selesai' => $request->tanggal_selesai
+        ])->setPaper('A4', 'landscape');
+
+        return $pdf->download('rekap_peminjaman.pdf');
+    }
+
+    // Tambah jumlah
+    public function update(Request $request)
+    {
+        $id = $request->id_barang;
+        $jumlah = $request->jumlah;
+
+        $cart = session('cart', []);
+
+        if ($jumlah > 0) {
+            $cart[$id] = [
+                'id_barang' => $id,
+                'jumlah' => $jumlah
+            ];
+        } else {
+            unset($cart[$id]);
+        }
+
+        session(['cart' => $cart]);
+
+        return response()->json(['message' => 'Cart updated']);
+    }
+
+
+}
+
+
+// session-timer.js - Menangani session timer untuk timeout 1 menit
+document.addEventListener('DOMContentLoaded', function() {
+    // Elemen untuk menampilkan timer
+    const timerElement = document.getElementById('session-timer');
+    
+    if (!timerElement) return; // Keluar jika tidak ada elemen timer di halaman
+    
+    // Tambahkan style untuk animasi kedip pada timer
+    const style = document.createElement('style');
+    style.innerHTML = `
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+        .timer-blinking {
+            animation: blink 1s linear infinite;
+            color: red !important;
+            font-weight: bold !important;
+        }
+    `;
+    document.head.appendChild(style);
+    
+    // Hapus localStorage jika pada halaman login
+    if (window.location.href.includes('login')) {
+        localStorage.removeItem('sessionStartTime');
+        localStorage.removeItem('notifiedUser');
+        return; // Tidak perlu menjalankan timer di halaman login
+    }
+    
+    // Waktu timeout dalam milidetik (1 menit = 60000 ms)
+    const sessionTimeout = 60000;
+    
+    // Fungsi untuk memulai timer baru
+    function startNewTimer() {
+        const now = new Date().getTime();
+        localStorage.setItem('sessionStartTime', now.toString());
+        return now;
+    }
+    
+    // Dapatkan waktu mulai dari localStorage atau buat baru jika tidak ada
+    let startTime = localStorage.getItem('sessionStartTime');
+    if (!startTime) {
+        startTime = startNewTimer();
+        // Notifikasi awal dihapus - tidak ada alert yang ditampilkan
+    } else {
+        startTime = parseInt(startTime);
+        
+        // Jika timer sudah kedaluwarsa, buat yang baru
+        const now = new Date().getTime();
+        if (now - startTime >= sessionTimeout) {
+            startTime = startNewTimer();
+        }
+    }
+    
+    // Fungsi untuk memperbarui tampilan timer
+    function updateTimer() {
+        const now = new Date().getTime();
+        const timeLeft = sessionTimeout - (now - startTime);
+        
+        if (timeLeft <= 0) {
+            // Hentikan interval timer
+            clearInterval(timerInterval);
+            clearInterval(extendInterval);
+            
+            // Hapus localStorage
+            localStorage.removeItem('sessionStartTime');
+            
+            // Tampilkan notifikasi bahwa sesi telah habis
+            alert('Sesi Anda telah berakhir. Silakan login kembali.');
+            
+            // Redirect ke halaman logout setelah user menutup alert
+            window.location.href = '/logout';
+            return;
+        }
+        
+        // Format waktu tersisa (mm:ss)
+        const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((timeLeft % (1000 * 60)) / 1000);
+        
+        // Tampilkan timer dengan format yang benar
+        timerElement.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        
+        // Tambahkan peringatan visual saat waktu hampir habis (kurang dari 15 detik)
+        if (timeLeft < 15000) {
+            timerElement.classList.add('timer-blinking');
+        } else {
+            timerElement.classList.remove('timer-blinking');
+            // Warna oranye untuk 30 detik terakhir
+            if (timeLeft < 30000) {
+                timerElement.style.color = 'orange';
+                timerElement.style.fontWeight = 'bold';
+            } else {
+                timerElement.style.color = '';
+                timerElement.style.fontWeight = '';
+            }
+        }
+    }
+    
+    // Perbarui timer setiap 1 detik
+    updateTimer(); // Panggil sekali untuk menghindari delay awal
+    const timerInterval = setInterval(updateTimer, 1000);
+    
+    // Setup AJAX untuk perpanjang sesi di backend setiap 30 detik
+    const extendInterval = setInterval(function() {
+        fetch('/extend-session', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
+            },
+            credentials: 'same-origin'
+        })
+        .catch(error => console.error('Error extending session:', error));
+    }, 30000);
+    
+    // Bersihkan interval saat halaman ditutup
+    window.addEventListener('beforeunload', function() {
+        clearInterval(timerInterval);
+        clearInterval(extendInterval);
+    });
+});
+
+kembalikan_form.blade.php
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- @vite(['resources/js/app.js']) -->
+    <meta charset="UTF-8">
+    <title>Form Kembalikan</title>
+    <link rel="icon" type="image/png" href="{{ asset('images/logo.png') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+
+</head>
+<body>
+    
+    <!-- Header Pinjaman -->
+    <div class="header">
+        <h1>PINJAMAN</h1>
+        <div class="button-group">
+            <a href="{{ route('welcome') }}" class="btn-home">
+                <img src="{{ asset('images/home.png') }}" alt="icon" class="btn-icon">
+
+            </a>
+            <a href="{{ route('welcome') }}" class="btn-back">Back</a>
+        </div>
+    </div>
+
+    <!-- Notifikasi Sukses -->
+    @if (session('success'))
+    <div class="overlay" id="popupOverlay"></div>
+    <div class="popup-success" id="popupSuccess">
+        <p>{{ session('success') }} ✅</p>
+        <button onclick="closeSuccess()">Ok</button>
+    </div>
+
+    <script>
+        function closeSuccess() {
+            const popup = document.getElementById('popupSuccess');
+            const overlay = document.getElementById('popupOverlay');
+            if (popup) popup.style.display = 'none';
+            if (overlay) overlay.style.display = 'none';
+
+            // Redirect to home after closing the popup
+            window.location.href = "{{ route('welcome') }}";
+        }
+
+        // Tutup popup setelah 3 detik, lalu redirect ke home
+        setTimeout(() => {
+            closeSuccess();
+        }, 10000); // 10 detik
+    </script>
+    @endif
+    
+    <!-- Untuk Handling error ketika Data tidak ditemukan -->
+    @if ($errors->has('not_found'))
+        <div class="overlay" id="popupOverlay"></div>
+        <div class="popup-error" id="popupError">
+            <p>{{ $errors->first('not_found') }}</p>
+            <button onclick="closePopup()">Ok</button>
+        </div>
+    @endif
+
+    <!-- List Barang yang dipinjam dan Form -->
+    <form action="{{ route('peminjaman.kembalikanCek') }}" method="POST">
+        @csrf
+            <div class="container">
+                    <div class="left">
+                        <div class="kotak-form">
+                            <h3>Masukkan NIM dan Nama</h3>
+                        </div>
+                    </div>
+
+                <div class="right">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="nim">NIM</label>
+                            <input type="text" name="nim" id="nim" placeholder="NIM" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="nama_mahasiswa">Nama</label>
+                            <input type="text" name="nama_mahasiswa" id="nama_mahasiswa" placeholder="Nama" required>
+                        </div>
+                    </div>
+
+                        <button type="submit" class="submit-btn">CARI DATA ANDA</button>
+                    </form>
+
+                </div>
+
+            </div>
+        </form>
+
+        <!-- closePopup Notification -->
+        <script>
+            function closePopup() {
+                const errorPopup = document.getElementById('popupError');
+                const overlay = document.getElementById('popupOverlay');
+                if (errorPopup) errorPopup.style.display = 'none';
+                if (overlay) overlay.style.display = 'none';
+            }
+
+            // Auto-close setelah 5 detik
+            setTimeout(() => {
+                closePopup();
+            }, 5000);
+        </script>
+
+</body>
+</html>
+
+
+kembalikan.blade.php
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Pinjaman</title>
+    <link rel="icon" type="image/png" href="{{ asset('images/logo.png') }}">
+    
+</head>
+
+<body>
+
+    <!-- Header -->
+    <div class="header">
+        <h1>PINJAMAN</h1>
+        <div class="button-group">
+            <a href="{{ route('welcome') }}" class="btn-home">
+                <img src="{{ asset('images/home.png') }}" alt="icon" class="btn-icon">
+            </a>
+            <a href="{{ route('welcome') }}" class="btn-back">Back</a>
+        </div>
+    </div>
+
+    <!-- Notifikasi -->
+    @if (session('success'))
+        <div class="overlay" id="popupOverlay"></div>
+        <div class="popup-success" id="popupSuccess">
+            <p>{{ session('success') }} ✅</p>
+            <button onclick="closeSuccess()">Ok</button>
+        </div>
+    @endif
+
+    <div class="content">
+        <!-- Kiri -->
+        <div class="left">
+    @if($peminjaman->isEmpty())
+        <div style="padding: 20px; background-color: #ffe6e6; border: 1px solid #ff4d4d; border-radius: 8px; margin-bottom: 20px; text-align:center; color: #d8000c;">
+            <strong>Tidak ada peminjaman saat ini.</strong>
+        </div>
+    @else
+        @foreach($peminjaman as $pinjam)
+            @php $barang = $pinjam->barang; @endphp
+            <div class="item-card">
+                @if($barang && $barang->foto->count() > 0)
+                    <img class="produk-image" src="{{ asset('storage/' . $barang->foto->first()->foto) }}" width="100">
+                @else
+                    <img class="produk-image" src="{{ asset('images/no-image.png') }}" width="100">
+                @endif
+
+                <div class="item-info">
+                    <h4>{{ $barang->nama_barang ?? 'Barang sudah dihapus' }}</h4>
+                    <div class="stok-btn">Dipinjam: <strong>{{ $pinjam->jumlah }}</strong> item</div>
+                    <form action="{{ route('peminjaman.kembalikanProses', $pinjam->id_peminjaman) }}" method="POST" style="margin-top:10px; display:flex; gap:10px;">
+                        @csrf
+                        <input type="number" name="jumlah_kembalikan" min="1" max="{{ $pinjam->jumlah }}" value="1" style="width:60px;">
+                        <button type="submit" class="btn-kembalikan">Kembalikan</button>
+                    </form>
+                </div>
+            </div>
+        @endforeach
+    @endif
+</div>
+
+
+        <!-- Kanan -->
+        <div class="right">
+            <h1 style="color:#65558F">TOTAL: <span>{{ $peminjaman->sum('jumlah') }} ITEM</span></h1><br>
+
+            <label>NIM</label>
+            <input type="text" value="{{ $mahasiswa->nim }}" readonly>
+
+            <label>Nama</label>
+            <input type="text" value="{{ $mahasiswa->nama_mahasiswa }}" readonly>
+
+            @php
+                $masihDipinjam = $peminjaman->where('status', '!=', 'Dikembalikan')->count();
+            @endphp
+
+            @if($masihDipinjam > 0)
+                <form action="{{ route('peminjaman.kembalikanSemuaBarang') }}" method="POST">
+                    @csrf
+                    <input type="hidden" name="id_mahasiswa" value="{{ $mahasiswa->id_mahasiswa }}">
+                    <button type="submit" onclick="return confirm('Yakin ingin mengembalikan semua barang?')" class="btn-kembalikan-semua">
+                        Kembalikan Semua
+                    </button>
+                </form>
+            @else
+                <a href="{{ route('welcome') }}" class="btn-kembali-home">
+                    ⬅ Kembali ke Home
+                </a>
+            @endif
+        </div>
+    </div>
+
+</body>
+
+</html>
+
+
+<?php
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\BarangController;
+use App\Http\Controllers\FotoController;
+use App\Http\Controllers\BarangMasukController;
+use App\Http\Controllers\MahasiswaController;
+use App\Http\Controllers\PeminjamanController;
+use App\Http\Controllers\PengambilanController;
+use App\Http\Controllers\AdminController;
+use App\Models\Barang;
+
+// Route untuk extend session
+Route::post('/extend-session', [App\Http\Controllers\MahasiswaController::class, 'extendSession']);
+
+// Pastikan rute lainnya ada dan berfungsi dengan benar
+Route::get('/login', [App\Http\Controllers\MahasiswaController::class, 'showLoginForm'])->name('login.form');
+Route::post('/login', [App\Http\Controllers\MahasiswaController::class, 'login'])->name('login.submit');
+Route::get('/logout', [App\Http\Controllers\MahasiswaController::class, 'logout'])->name('logout');
+
+// Route yang memerlukan autentikasi
+Route::middleware(['web', 'mahasiswa.session'])->group(function () {
+    Route::get('/welcome', function () {
+        // Periksa session timeout sebelum menampilkan halaman
+        app(MahasiswaController::class)->checkSessionTimeout();
+        
+        // Halaman welcome setelah login
+        return view('welcome');
+    })->name('welcome');
+    
+    // Tambahkan route lain yang memerlukan autentikasi di sini
+});
+
+
+Route::get('/welcome', [BarangController::class, 'cari'])->name('welcome');
+
+// DASHBOARD
+
+Route::get('/dbconn', function () {
+    return view('dbconn');
+});
+
+// ADMIN-PAGE
+Route::get('/adminDashboard', [BarangController::class, 'index'])->name('barang.index');
+Route::get('/adminDashboard_formTambah', [BarangController::class, 'formTambah'])->name('barang.formTambah');
+Route::post('/adminDashboard', [BarangController::class, 'add'])->name('barang.add');
+Route::get('/adminDashboard/{id}/edit', [BarangController::class, 'edit'])->name('barang.edit');
+Route::put('/adminDashboard/{id}', [BarangController::class, 'update'])->name('barang.update');
+Route::delete('/adminDashboard/{id}', [BarangController::class, 'delete'])->name('barang.delete');
+Route::get('/barang/{id}', [BarangController::class, 'show'])->name('barang.show');
+Route::get('/admin/notifikasi', [BarangController::class, 'notifikasi'])->name('barang.notifikasi');
+Route::delete('/notif/remove/{id}', [BarangController::class, 'remove'])->name('notif.remove');
+Route::post('/notif/clear', [BarangController::class, 'clearAll'])->name('notif.clear');
+
+Route::post('/tambah-kategori', [App\Http\Controllers\BarangController::class, 'tambahKategori'])->name('barang.tambahKategori');
+
+// PENCARIAN BARANG
+Route::get('/cari-barang', [BarangController::class, 'cari']);
+
+// FOTO
+Route::post('/foto/store', [FotoController::class, 'store'])->name('foto.store');
+
+// BARANG MASUK
+Route::get('/barang_masuk', [BarangMasukController::class, 'index']);
+Route::post('/barang_masuk', [BarangMasukController::class, 'store'])->name('barang_masuk.store');
+
+// DATA MAHASISWA
+Route::resource('mahasiswa', MahasiswaController::class);
+
+// PEMINJAMAN DAN PENGEMBALIAN
+
+    // NON ADMIN OPERATION
+    Route::get('/peminjaman', [PeminjamanController::class, 'index'])->name('peminjaman.index');
+    Route::get('/peminjaman/tambah', [PeminjamanController::class, 'create'])->name('peminjaman.create');
+    Route::post('/peminjaman', [PeminjamanController::class, 'store'])->name('peminjaman.store');
+    Route::post('/peminjaman/kembalikan', [PeminjamanController::class, 'formKembalikan'])->name('peminjaman.kembalikanCek');
+    Route::post('/peminjaman/kembalikan/{id}', [PeminjamanController::class, 'prosesKembalikan'])->name('peminjaman.kembalikanProses');
+    Route::get('/peminjaman/kembalikan', function () {return view('peminjaman.kembalikan_form');})->name('peminjaman.kembalikanForm');
+    Route::post('/peminjaman/kembalikan-semua', [PeminjamanController::class, 'kembalikanSemuaBarang'])->name('peminjaman.kembalikanSemuaBarang');
+    
+
+    
+    // Peminjaman barang yang FIX
+    Route::get('/listbarang', [PeminjamanController::class, 'listBarang'])->name('listbarang');
+    Route::get('/keranjang', [PeminjamanController::class, 'showKeranjang'])->name('keranjang');
+    Route::post('/keranjang', [PeminjamanController::class, 'submitPeminjaman'])->name('submit.peminjaman');
+    Route::get('/keranjang/updateKeranjang', [PeminjamanController::class, 'update'])->name('peminjaman.update');
+    
+    // ADMIN OPERATION
+    Route::get('/riwayat_peminjaman', [PeminjamanController::class, 'show_riwayat_peminjaman'])->name('admin/peminjaman.index');
+    Route::get('/admin/peminjaman/exportPDF', [PeminjamanController::class, 'exportPDF'])->name('admin/peminjaman.export');
+
+
+// PENGAMBILAN
+
+    // NON ADMIN OPERATION
+    // Pengambilan Fix
+    Route::get('/listbarang2', [PengambilanController::class, 'listbarang2'])->name('listbarang2');
+    Route::get('/listbarang', [PeminjamanController::class, 'listBarang'])->name('listbarang');
+    Route::get('/keranjang2', [PengambilanController::class, 'showKeranjang2'])->name('keranjang2');
+    Route::post('/keranjang2', [PengambilanController::class, 'submitPengambilan'])->name('submit.pengambilan');
+
+    // ini bukan fix
+    Route::get('/pengambilan', [PengambilanController::class, 'index'])->name('pengambilan.index');
+    Route::get('/pengambilan/tambah', [PengambilanController::class, 'create'])->name('pengambilan.create');
+    Route::post('/pengambilan', [PengambilanController::class, 'store'])->name('pengambilan.store');
+
+    // ADMIN OPERATION
+    Route::get('/riwayat_pengambilan', [PengambilanController::class, 'show_riwayat_pengambilan'])->name('admin/pengambilan.index');
+    Route::get('/admin/pengambilan/export-PDF', [PengambilanController::class, 'exportPDF'])->name('admin/pengambilan.export-pdf');
+
+
+// ADMIN LOGIN
+Route::get('/admin/login', [AdminController::class, 'showLoginForm'])->name('admin.login');
+Route::post('/admin/login', [AdminController::class, 'login'])->name('admin.login.submit');
+
+// JAVA DROP FOTO
+Route::get('js/tambah.js', function () {
+    return response()->file(resource_path('js/tambah.js'));
+});
+
+Route::get('js/session-timer.js', function () {
+    return response()->file(resource_path('js/session-timer.js'));
+});
+
