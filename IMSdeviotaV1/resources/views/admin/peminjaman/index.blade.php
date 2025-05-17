@@ -368,27 +368,12 @@
             <td>{{ $pinjam->status }}</td>
             <td>
                 @if($pinjam->foto_pengembalian)
-                    @php
-                        // Jika foto_pengembalian adalah array path
-                        $fotos = is_array($pinjam->foto_pengembalian) ? $pinjam->foto_pengembalian : [$pinjam->foto_pengembalian];
-                        $jumlahFoto = count($fotos);
-                        $fotoPertama = $fotos[0];
-                    @endphp
-                    
-                    <div class="foto-thumbs" style="position: relative;">
-                        <a href="{{ Storage::url($fotoPertama) }}" target="_blank">
-                            <img src="{{ Storage::url($fotoPertama) }}"
+                    <div class="foto-thumbs">
+                        <a href="{{ Storage::url($pinjam->foto_pengembalian) }}" target="_blank">
+                            <img src="{{ Storage::url($pinjam->foto_pengembalian) }}"
                                 width="60" height="60"
-                                style="object-fit: cover; border-radius: 4px;"
+                                style="object-fit: cover; margin-right: 5px;"
                                 alt="Foto Pengembalian">
-                            
-                            @if($jumlahFoto > 1)
-                                <span style="position: absolute; bottom: 0; right: 0; 
-                                        background: rgba(0,0,0,0.7); color: white; 
-                                        padding: 2px 5px; border-radius: 4px; font-size: 10px;">
-                                    +{{ $jumlahFoto - 1 }}
-                                </span>
-                            @endif
                         </a>
                     </div>
                 @else

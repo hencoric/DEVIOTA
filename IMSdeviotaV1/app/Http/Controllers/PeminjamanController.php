@@ -255,6 +255,7 @@ class PeminjamanController extends Controller
     {
         $request->validate([
             'id_mahasiswa' => 'required|exists:mahasiswa,id_mahasiswa',
+            'foto_pengembalian' => 'nullable|image|mimes:jpeg,png,jpg,JPEG,PNG,JPG|max:2048',
         ]);
 
         $idMahasiswa = $request->id_mahasiswa;
@@ -263,6 +264,13 @@ class PeminjamanController extends Controller
         $peminjaman = Peminjaman::where('id_mahasiswa', $idMahasiswa)
             ->where('status', '!=', 'Dikembalikan')
             ->get();
+
+        // Periksa dan simpan foto pengembalian sekali saja jika ada
+        $fotoPath = null;
+        if ($request->hasFile('foto_pengembalian')) {
+            $file = $request->file('foto_pengembalian');
+            $fotoPath = $file->store('uploads/pengembalian', 'public');
+        }
 
         foreach ($peminjaman as $item) {
             $jumlahSekarang = $item->jumlah;
@@ -273,6 +281,11 @@ class PeminjamanController extends Controller
                 $barang = Barang::findOrFail($item->id_barang);
                 $barang->stok += $jumlahSekarang;
                 $barang->save();
+            }
+
+            // Simpan path foto jika ada
+            if ($fotoPath) {
+                $item->foto_pengembalian = $fotoPath;
             }
 
             $item->status = 'Dikembalikan';
@@ -294,7 +307,8 @@ class PeminjamanController extends Controller
         $peminjaman = Peminjaman::with('mahasiswa')->findOrFail($id);
 
         $request->validate([
-            'jumlah_kembalikan' => 'required|numeric|min:1|max:' . $peminjaman->jumlah
+            'jumlah_kembalikan' => 'required|numeric|min:1|max:' . $peminjaman->jumlah,
+            'foto_pengembalian' => 'nullable|image|mimes:jpeg,png,jpg,JPEG,PNG,JPG|max:2048',
         ]);
 
         $jumlahKembalikan = $request->jumlah_kembalikan;
@@ -303,6 +317,13 @@ class PeminjamanController extends Controller
         $sessionKey = "jumlah_awal_{$peminjaman->id_peminjaman}";
         if (!session()->has($sessionKey)) {
             session()->put($sessionKey, $peminjaman->jumlah);
+        }
+
+        // Upload foto jika ada
+        if ($request->hasFile('foto_pengembalian')) {
+            $file = $request->file('foto_pengembalian');
+            $path = $file->store('uploads/pengembalian', 'public');
+            $peminjaman->foto_pengembalian = $path;
         }
 
         // Tambahkan ke stok barang

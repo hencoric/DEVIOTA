@@ -35,8 +35,10 @@
             text-align: left; 
         }
         th { 
-            background-color: #eee; 
+            background-color: #6c2bd9;
+            font-color 
             font-weight: bold;
+            color: white;
         }
         .filter-info {
             margin: 10px 0;
@@ -48,13 +50,12 @@
     </style>
 </head>
 <body>
-    <div class="header">
+    <div style="text-align: center;" class="header">
         <img src="{{ public_path('images/logo.png') }}" class="logo" alt="Logo">
         <div class="header-text">
         </div>
     </div>
-    <h1>Rekap Data Peminjaman</h1>
-            <p>Laporan Sistem Peminjaman Barang</p>
+    <h1 style="text-align: center;">Rekap Data Peminjaman</h1>
 
     <div class="filter-info">
         <p><strong>Status:</strong> {{ $status_terpilih ?: 'Semua' }}</p>
