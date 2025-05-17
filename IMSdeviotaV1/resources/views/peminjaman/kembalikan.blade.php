@@ -333,9 +333,17 @@
                         <div class="item-info">
                             <h4>{{ $barang->nama_barang ?? 'Barang sudah dihapus' }}</h4>
                             <div class="stok-btn">Dipinjam: <strong>{{ $pinjam->jumlah }}</strong> item</div>
-                            <form action="{{ route('peminjaman.kembalikanProses', $pinjam->id_peminjaman) }}" method="POST" style="margin-top:10px; display:flex; gap:10px;">
+                            <form action="{{ route('peminjaman.kembalikanProses', $pinjam->id_peminjaman) }}" 
+                                method="POST" 
+                                enctype="multipart/form-data"
+                                class="form-kembalikan-sebagian"
+                                style="margin-top:10px; display:flex; gap:10px;">
                                 @csrf
-                                <input type="number" name="jumlah_kembalikan" min="1" max="{{ $pinjam->jumlah }}" value="1" style="width:60px;">
+
+                                <div style="display:flex; gap:10px;">
+                                    <input type="number" name="jumlah_kembalikan" min="1" max="{{ $pinjam->jumlah }}" value="1" style="width:60px;">
+                                </div>
+
                                 <button type="submit" class="btn-kembalikan">Kembalikan</button>
                             </form>
 
@@ -377,8 +385,11 @@
             @endphp
 
             @if($masihDipinjam > 0)
-                <form action="{{ route('peminjaman.kembalikanSemuaBarang') }}" method="POST">
+                <form action="{{ route('peminjaman.kembalikanSemuaBarang') }}" method="POST" enctype="multipart/form-data">
                     @csrf
+                    <label for="foto_pengembalian">Bukti Foto Pengembalian:</label><br>
+                    <input type="file" name="foto_pengembalian" id="foto_pengembalian_global" accept="image/*"><br><br>
+
                     <input type="hidden" name="id_mahasiswa" value="{{ $mahasiswa->id_mahasiswa }}">
                     <button type="submit" onclick="return confirm('Yakin ingin mengembalikan semua barang?')" class="btn-kembalikan-semua">
                         Kembalikan Semua
